@@ -418,6 +418,48 @@ fn not_implemented(_args: &[Node]) -> StaticResult {
     StaticResult::Scalar
 }
 
+/// ROW and COLUMN give a single number for a single cell, and when the
+/// reference stays within one row (ROW) or one column (COLUMN). Otherwise they
+/// give a vector of numbers, one for each row or column of the reference.
+fn static_analysis_row_column(args: &[Node], is_row: bool) -> StaticResult {
+    let Some(reference) = args.first() else {
+        return StaticResult::Scalar;
+    };
+    // The vector is `Unknown` and not `Array`: a formula from before dynamic
+    // arrays expects a single number here, and it is the unknown results that
+    // are intersected (see `add_implicit_intersection`).
+    match reference {
+        Node::RangeKind {
+            absolute_row1,
+            absolute_column1,
+            row1,
+            column1,
+            absolute_row2,
+            absolute_column2,
+            row2,
+            column2,
+            ..
+        } => {
+            // The two ends are only comparable if both are absolute or both
+            // are relative to the cell.
+            let single = if is_row {
+                absolute_row1 == absolute_row2 && row1 == row2
+            } else {
+                absolute_column1 == absolute_column2 && column1 == column2
+            };
+            if single {
+                StaticResult::Scalar
+            } else {
+                StaticResult::Unknown
+            }
+        }
+        other => match run_static_analysis_on_node(other) {
+            StaticResult::Scalar => StaticResult::Scalar,
+            _ => StaticResult::Unknown,
+        },
+    }
+}
+
 /// SUMIF spills according to the shape of its criteria argument (`args[1]`); the
 /// criteria_range and sum_range arguments are consumed, not broadcast. A scalar
 /// criterion yields a scalar; a range/array criterion yields an array of the
@@ -1066,7 +1108,7 @@ fn get_function_args_signature(kind: &Function, arg_count: usize) -> Vec<Signatu
         Function::Hstack => vec![Signature::Vector; arg_count],
         Function::Hyperlink => args_signature_scalars(arg_count, 1, 1),
         Function::Index => args_signature_index(arg_count),
-        Function::Indirect => args_signature_scalars(arg_count, 1, 0),
+        Function::Indirect => args_signature_scalars(arg_count, 1, 1),
         Function::Lookup => args_signature_lookup(arg_count),
         Function::Match => args_signature_match(arg_count),
         Function::Offset => args_signature_offset(arg_count),
@@ -1674,7 +1716,7 @@ fn static_analysis_on_function(kind: &Function, args: &[Node]) -> StaticResult {
             StaticResult::Array(n, m) => StaticResult::Range(n, m),
             other => other,
         },
-        Function::Column => not_implemented(args),
+        Function::Column => static_analysis_row_column(args, false),
         Function::Columns => not_implemented(args),
         Function::Cos => scalar_arguments(args),
         Function::Cosh => scalar_arguments(args),
@@ -1728,7 +1770,7 @@ fn static_analysis_on_function(kind: &Function, args: &[Node]) -> StaticResult {
         Function::Lookup => not_implemented(args),
         Function::Match => not_implemented(args),
         Function::Offset => static_analysis_offset(args),
-        Function::Row => StaticResult::Scalar,
+        Function::Row => static_analysis_row_column(args, true),
         Function::Rows => not_implemented(args),
         Function::Vlookup => not_implemented(args),
         Function::Vstack => StaticResult::Unknown,
@@ -1758,18 +1800,18 @@ fn static_analysis_on_function(kind: &Function, args: &[Node]) -> StaticResult {
         Function::Textsplit => StaticResult::Unknown,
         Function::Concat => not_implemented(args),
         Function::Concatenate => not_implemented(args),
-        Function::Exact => not_implemented(args),
-        Function::Find => not_implemented(args),
+        Function::Exact => scalar_arguments(args),
+        Function::Find => scalar_arguments(args),
         // LEFT/MID/RIGHT broadcast element-wise: an array/range argument yields an array.
         Function::Left => scalar_arguments(args),
-        Function::Len => not_implemented(args),
+        Function::Len => scalar_arguments(args),
         // UPPER/LOWER broadcast element-wise: an array/range argument yields an array.
         Function::Lower => scalar_arguments(args),
         Function::Mid => scalar_arguments(args),
-        Function::Rept => not_implemented(args),
+        Function::Rept => scalar_arguments(args),
         Function::Right => scalar_arguments(args),
-        Function::Search => not_implemented(args),
-        Function::Substitute => not_implemented(args),
+        Function::Search => scalar_arguments(args),
+        Function::Substitute => scalar_arguments(args),
         Function::Regexextract => {
             if args.len() == 3 {
                 StaticResult::Unknown
@@ -1784,11 +1826,11 @@ fn static_analysis_on_function(kind: &Function, args: &[Node]) -> StaticResult {
         Function::Textafter => not_implemented(args),
         Function::Textbefore => not_implemented(args),
         Function::Textjoin => not_implemented(args),
-        Function::Trim => not_implemented(args),
+        Function::Trim => scalar_arguments(args),
         Function::Unicode => not_implemented(args),
         Function::Unichar => not_implemented(args),
         Function::Char => not_implemented(args),
-        Function::Clean => not_implemented(args),
+        Function::Clean => scalar_arguments(args),
         Function::Code => not_implemented(args),
         Function::Asc => not_implemented(args),
         Function::Arraytotext => not_implemented(args),
@@ -1800,8 +1842,8 @@ fn static_analysis_on_function(kind: &Function, args: &[Node]) -> StaticResult {
         Function::Lenb => not_implemented(args),
         Function::Midb => not_implemented(args),
         Function::Numbervalue => not_implemented(args),
-        Function::Proper => not_implemented(args),
-        Function::Replace => not_implemented(args),
+        Function::Proper => scalar_arguments(args),
+        Function::Replace => scalar_arguments(args),
         Function::Replaceb => not_implemented(args),
         Function::Rightb => not_implemented(args),
         Function::Searchb => not_implemented(args),
