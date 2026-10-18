@@ -13,6 +13,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { FileBar } from "./components/FileBar";
 import LeftDrawer from "./components/LeftDrawer/LeftDrawer";
+import { NoticeBar } from "./components/NoticeBar";
 import {
   get_documentation_model,
   get_model,
@@ -28,15 +29,18 @@ import {
   getShortLocaleCode,
   initStorage,
   isStorageEmpty,
-  loadDarkModeFromStorage,
   loadDefaultLocaleFromStorage,
   loadSelectedModelFromStorage,
-  saveDarkModeInStorage,
+  loadThemeModeFromStorage,
   saveDefaultLocaleInStorage,
   saveModelToStorage,
   saveSelectedModelInStorage,
+  saveThemeModeInStorage,
   selectModelFromStorage,
   subscribeToStorage,
+  systemPrefersDark,
+  type ThemeMode,
+  watchSystemDarkMode,
 } from "./components/storage";
 import TemplatesDialog from "./components/WelcomeDialog/TemplatesDialog";
 import WelcomeDialog from "./components/WelcomeDialog/WelcomeDialog";
@@ -46,9 +50,18 @@ function App() {
   const [showWelcomeDialog, setShowWelcomeDialog] = useState(false);
   const [isTemplatesDialogOpen, setTemplatesDialogOpen] = useState(false);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-  const [isDarkMode, setIsDarkMode] = useState(loadDarkModeFromStorage);
+  const [themeMode, setThemeMode] = useState<ThemeMode>(
+    loadThemeModeFromStorage,
+  );
+  const [systemIsDark, setSystemIsDark] = useState(systemPrefersDark);
+  useEffect(() => watchSystemDarkMode(setSystemIsDark), []);
+  const isDarkMode =
+    themeMode === "system" ? systemIsDark : themeMode === "dark";
 
   const ironCalcRef = useRef<IronCalcHandle>(null);
+  // A workbook opened from a link (?model= or ?example=) stays read-only until
+  // a copy is saved. Every handler that opens another workbook must reset it.
+  const [isReadOnly, setIsReadOnly] = useState(false);
   // Guards against overlapping autosaves and repeated error alerts.
   const isSavingRef = useRef(false);
   const saveErrorReportedRef = useRef(false);
@@ -77,9 +90,9 @@ function App() {
     }
   };
 
-  const handleDarkModeChange = (isDark: boolean) => {
-    setIsDarkMode(isDark);
-    saveDarkModeInStorage(isDark);
+  const handleThemeModeChange = (mode: ThemeMode) => {
+    setThemeMode(mode);
+    saveThemeModeInStorage(mode);
   };
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: Run only for i18n.language dependency
@@ -121,6 +134,7 @@ function App() {
 
       if (loadedModel) {
         setModel(loadedModel);
+        setIsReadOnly(true);
       } else {
         // try to load from storage
         const result = await loadSelectedModelFromStorage();
@@ -187,30 +201,47 @@ function App() {
     );
   }
 
+  // Shows a local (editable) workbook and drops the query string, so a refresh
+  // opens this workbook instead of the shared or example one from the URL.
+  const showLocalModel = (localModel: Model) => {
+    setModel(localModel);
+    setIsReadOnly(false);
+    window.history.replaceState(null, "", window.location.pathname);
+  };
+
   // Handlers for model changes that also update our models state
   const handleNewModel = async () => {
-    const newModel = await createNewModel();
-    setModel(newModel);
+    showLocalModel(await createNewModel());
   };
 
   const handleSetModel = async (uuid: string) => {
     const newModel = await selectModelFromStorage(uuid);
     if (newModel) {
-      setModel(newModel);
+      showLocalModel(newModel);
     }
   };
 
   const handleDeleteModel = async () => {
     const newModel = await deleteSelectedModel();
     if (newModel) {
-      setModel(newModel);
+      showLocalModel(newModel);
     }
   };
 
   const handleDeleteModelByUuid = async (uuid: string) => {
     const newModel = await deleteModelByUuid(uuid);
     if (newModel) {
-      setModel(newModel);
+      showLocalModel(newModel);
+    }
+  };
+
+  // Stores the open (shared or example) workbook as a new local workbook.
+  const handleSaveCopy = async () => {
+    try {
+      await saveModelToStorage(model);
+      showLocalModel(model);
+    } catch (e) {
+      reportSaveError(e);
     }
   };
 
@@ -242,8 +273,7 @@ function App() {
             const languageId = getLanguageFromLocale(locale);
             const newModel = Model.fromBytes(bytes, languageId);
             await saveModelToStorage(newModel);
-
-            setModel(newModel);
+            showLocalModel(newModel);
           }}
           newModel={handleNewModel}
           newModelFromTemplate={() => {
@@ -251,16 +281,25 @@ function App() {
           }}
           setModel={handleSetModel}
           onDelete={handleDeleteModel}
+          isReadOnly={isReadOnly}
           isDrawerOpen={isDrawerOpen}
           setIsDrawerOpen={setIsDrawerOpen}
           onLanguageChange={handleLanguageChange}
-          isDarkMode={isDarkMode}
-          onDarkModeChange={handleDarkModeChange}
+          themeMode={themeMode}
+          onThemeModeChange={handleThemeModeChange}
         />
+        {isReadOnly && (
+          <NoticeBar
+            message={t("unsaved_bar.message")}
+            actionLabel={t("unsaved_bar.save_copy")}
+            onAction={handleSaveCopy}
+          />
+        )}
         <IronCalc
           model={model}
           ref={ironCalcRef}
           themeVariables={isDarkMode ? darkThemeVariables : undefined}
+          canEdit={!isReadOnly}
         />
         {isDrawerOpen && (
           <div
@@ -304,6 +343,9 @@ function App() {
                 const locale = loadDefaultLocaleFromStorage();
                 const languageId = getLanguageFromLocale(locale);
                 const importedModel = Model.fromBytes(model_bytes, languageId);
+                importedModel.setName(
+                  t(`welcome_dialog.templates.${templateId}`),
+                );
                 await saveModelToStorage(importedModel);
                 setModel(importedModel);
                 break;
@@ -321,8 +363,9 @@ function App() {
           const locale = loadDefaultLocaleFromStorage();
           const languageId = getLanguageFromLocale(locale);
           const importedModel = Model.fromBytes(model_bytes, languageId);
+          importedModel.setName(t(`welcome_dialog.templates.${fileName}`));
           await saveModelToStorage(importedModel);
-          setModel(importedModel);
+          showLocalModel(importedModel);
           setTemplatesDialogOpen(false);
         }}
       />

@@ -49,7 +49,7 @@ pub use crate::mock_time::get_milliseconds_since_epoch;
 /// * The JavaScript environment
 /// * Or mocked for tests
 #[cfg(not(any(test, feature = "mock_time")))]
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 #[allow(clippy::expect_used)]
 pub fn get_milliseconds_since_epoch() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -65,7 +65,7 @@ pub fn get_milliseconds_since_epoch() -> i64 {
 /// * The JavaScript environment
 /// * Or mocked for tests
 #[cfg(not(any(test, feature = "mock_time")))]
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub fn get_milliseconds_since_epoch() -> i64 {
     use js_sys::Date;
     Date::now() as i64
@@ -210,8 +210,6 @@ pub struct Model<'a> {
     pub(crate) language: &'a Language,
     /// The timezone used to evaluate the model
     pub(crate) tz: Tz,
-    /// The view id. A view consists of a selected sheet and ranges.
-    pub(crate) view_id: u32,
     /// A stack of variables used for LET function evaluation. The key is the variable id, and the value is the variable value.
     pub(crate) variable_stack: HashMap<usize, CalcResult>,
     /// Last variable id used. It is incremented every time a new variable is created (for example, when evaluating a LET function).
@@ -1857,7 +1855,6 @@ impl<'a> Model<'a> {
             language,
             locale,
             tz,
-            view_id: 0,
             variable_stack: HashMap::new(),
             last_variable_id: 0,
             lambdas: HashMap::new(),

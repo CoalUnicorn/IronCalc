@@ -19,7 +19,7 @@ use ironcalc_base::{
     },
     types::{
         ArrayKind, Cell, Col, Color, Comment, DefinedName, Dxf, FormulaValue, Link, MergedCell,
-        SheetState, SpillValue, Table, Theme, Worksheet, WorksheetView,
+        SheetState, SpillValue, Table, Theme, Worksheet,
     },
 };
 use thiserror::Error;
@@ -208,13 +208,16 @@ fn load_dimension(ws: &XmlNode) -> String {
     }
 }
 
-fn load_columns(ws: &XmlNode) -> Result<Vec<Col>, XlsxError> {
+fn load_columns(ws: &XmlNode, default_width: f64) -> Result<Vec<Col>, XlsxError> {
     // cols
     // <cols>
     //     <col min="5" max="5" width="38.26953125" customWidth="1"/>
     //     <col min="6" max="6" width="9.1796875" style="1"/>
     //     <col min="8" max="8" width="4" customWidth="1"/>
     // </cols>
+    // NB: `width` is optional (ECMA-376 Part 1, 18.3.1.13): tools that only
+    // set a style or hide columns omit it, in which case Excel applies the
+    // sheet default width instead of rejecting the file (#1509).
     let mut cols = Vec::new();
     let columns = ws
         .children()
@@ -226,8 +229,10 @@ fn load_columns(ws: &XmlNode) -> Result<Vec<Col>, XlsxError> {
             let min = min.parse::<i32>()?;
             let max = get_attribute(col, "max")?;
             let max = max.parse::<i32>()?;
-            let width = get_attribute(col, "width")?;
-            let width = width.parse::<f64>()?;
+            let width = match col.attribute("width") {
+                Some(width) => width.parse::<f64>()?,
+                None => default_width,
+            };
             let custom_width = get_bool_false(col, "customWidth");
             let hidden = get_bool_false(col, "hidden");
             let style = col
@@ -244,6 +249,25 @@ fn load_columns(ws: &XmlNode) -> Result<Vec<Col>, XlsxError> {
         }
     }
     Ok(cols)
+}
+
+/// Sheet default column width in Excel character units, from
+/// `<sheetFormatPr defaultColWidth="..."/>` (ECMA-376 Part 1, 18.3.1.81).
+/// Falls back to Excel's own default of 8.43 when the element or the
+/// attribute is absent or unparseable.
+fn get_default_column_width(ws: &XmlNode) -> f64 {
+    const EXCEL_DEFAULT_COLUMN_WIDTH: f64 = 8.43;
+    let format = ws
+        .children()
+        .filter(|n| n.has_tag_name("sheetFormatPr"))
+        .collect::<Vec<&XmlNode>>();
+    if format.len() != 1 {
+        return EXCEL_DEFAULT_COLUMN_WIDTH;
+    }
+    format[0]
+        .attribute("defaultColWidth")
+        .and_then(|w| w.parse::<f64>().ok())
+        .unwrap_or(EXCEL_DEFAULT_COLUMN_WIDTH)
 }
 
 fn load_merge_cells(ws: &XmlNode) -> Result<Vec<MergedCell>, XlsxError> {
@@ -781,24 +805,16 @@ fn load_hyperlinks(
 }
 
 struct SheetView {
-    is_selected: bool,
-    selected_row: i32,
-    selected_column: i32,
     frozen_columns: i32,
     frozen_rows: i32,
-    range: [i32; 4],
     show_grid_lines: bool,
 }
 
 impl Default for SheetView {
     fn default() -> Self {
         Self {
-            is_selected: false,
-            selected_row: 1,
-            selected_column: 1,
             frozen_rows: 0,
             frozen_columns: 0,
-            range: [1, 1, 1, 1],
             show_grid_lines: true,
         }
     }
@@ -825,7 +841,8 @@ fn get_sheet_view(ws: &XmlNode) -> SheetView {
     // bottomLeft, bottomRight, topLeft, topRight
 
     // NB: bottomLeft is used when only rows are frozen, etc
-    // IronCalc ignores all those.
+    // IronCalc ignores all those, as well as the selection and the selected
+    // tab: a workbook always opens on its first sheet at A1.
 
     let mut frozen_rows = 0;
     let mut frozen_columns = 0;
@@ -852,7 +869,6 @@ fn get_sheet_view(ws: &XmlNode) -> SheetView {
     }
 
     let sheet_view = sheet_view[0];
-    let is_selected = sheet_view.attribute("tabSelected").unwrap_or("0") == "1";
     let show_grid_lines = sheet_view.attribute("showGridLines").unwrap_or("1") == "1";
 
     let pane = sheet_view
@@ -871,46 +887,10 @@ fn get_sheet_view(ws: &XmlNode) -> SheetView {
             frozen_rows = get_number(pane[0], "ySplit");
         }
     }
-    let selections = sheet_view
-        .children()
-        .filter(|n| n.has_tag_name("selection"))
-        .collect::<Vec<&XmlNode>>();
-
-    if let Some(selection) = selections.last() {
-        let active_cell = match selection.attribute("activeCell").map(parse_cell_reference) {
-            Some(Ok(s)) => Some(s),
-            _ => None,
-        };
-        let sqref = match selection.attribute("sqref").map(parse_range) {
-            Some(Ok(s)) => Some(s),
-            _ => None,
-        };
-
-        let (selected_row, selected_column, row1, column1, row2, column2) =
-            match (active_cell, sqref) {
-                (Some(cell), Some(range)) => (cell.0, cell.1, range.0, range.1, range.2, range.3),
-                (Some(cell), None) => (cell.0, cell.1, cell.0, cell.1, cell.0, cell.1),
-                (None, Some(range)) => (range.0, range.1, range.0, range.1, range.2, range.3),
-                _ => (1, 1, 1, 1, 1, 1),
-            };
-
-        SheetView {
-            frozen_rows,
-            frozen_columns,
-            selected_row,
-            selected_column,
-            is_selected,
-            show_grid_lines,
-            range: [row1, column1, row2, column2],
-        }
-    } else {
-        SheetView {
-            frozen_rows,
-            frozen_columns,
-            is_selected,
-            show_grid_lines,
-            ..Default::default()
-        }
+    SheetView {
+        frozen_rows,
+        frozen_columns,
+        show_grid_lines,
     }
 }
 
@@ -934,7 +914,7 @@ pub(super) fn load_sheet<R: Read + std::io::Seek>(
     defined_names: Vec<DefinedNameS>,
     theme: &Theme,
     dxfs: &mut Vec<Dxf>,
-) -> Result<(Worksheet, bool), XlsxError> {
+) -> Result<Worksheet, XlsxError> {
     let sheet_name = &settings.name;
     let sheet_id = settings.id;
     let state = &settings.state;
@@ -962,7 +942,8 @@ pub(super) fn load_sheet<R: Read + std::io::Seek>(
 
     let sheet_view = get_sheet_view(ws);
 
-    let cols = load_columns(ws)?;
+    let default_column_width = get_default_column_width(ws);
+    let cols = load_columns(ws, default_column_width)?;
     let color = load_sheet_color(ws, theme)?;
 
     let merged_cells = load_merge_cells(ws)?;
@@ -991,55 +972,24 @@ pub(super) fn load_sheet<R: Read + std::io::Seek>(
     // pageSetup
     // <pageSetup orientation="portrait" r:id="rId1"/>
 
-    let mut views = HashMap::new();
-    // The focus (the moving corner of the selection) is not in the file: use
-    // the corner of the range opposite the selected cell on each axis.
-    let [range_start_row, range_start_column, range_end_row, range_end_column] = sheet_view.range;
-    let focus_row = if sheet_view.selected_row == range_end_row {
-        range_start_row
-    } else {
-        range_end_row
-    };
-    let focus_column = if sheet_view.selected_column == range_end_column {
-        range_start_column
-    } else {
-        range_end_column
-    };
-    views.insert(
-        0,
-        WorksheetView {
-            row: sheet_view.selected_row,
-            column: sheet_view.selected_column,
-            range: sheet_view.range,
-            focus_row,
-            focus_column,
-            top_row: 1,
-            left_column: 1,
-        },
-    );
-
-    Ok((
-        Worksheet {
-            dimension,
-            cols,
-            rows,
-            shared_formulas,
-            sheet_data,
-            name: sheet_name.to_string(),
-            sheet_id,
-            state: state.to_owned(),
-            color,
-            merged_cells,
-            comments: settings.comments,
-            frozen_rows: sheet_view.frozen_rows,
-            frozen_columns: sheet_view.frozen_columns,
-            show_grid_lines: sheet_view.show_grid_lines,
-            views,
-            conditional_formatting,
-            links,
-        },
-        sheet_view.is_selected,
-    ))
+    Ok(Worksheet {
+        dimension,
+        cols,
+        rows,
+        shared_formulas,
+        sheet_data,
+        name: sheet_name.to_string(),
+        sheet_id,
+        state: state.to_owned(),
+        color,
+        merged_cells,
+        comments: settings.comments,
+        frozen_rows: sheet_view.frozen_rows,
+        frozen_columns: sheet_view.frozen_columns,
+        show_grid_lines: sheet_view.show_grid_lines,
+        conditional_formatting,
+        links,
+    })
 }
 
 pub(super) fn load_sheets<R: Read + std::io::Seek>(
@@ -1050,7 +1000,7 @@ pub(super) fn load_sheets<R: Read + std::io::Seek>(
     shared_strings: &mut SharedStringTable,
     theme: &Theme,
     dxfs: &mut Vec<Dxf>,
-) -> Result<(Vec<Worksheet>, u32), XlsxError> {
+) -> Result<Vec<Worksheet>, XlsxError> {
     // load comments, tables and hyperlink relationships
     let mut sheet_rels = HashMap::new();
     for sheet in &workbook.worksheets {
@@ -1072,8 +1022,6 @@ pub(super) fn load_sheets<R: Read + std::io::Seek>(
     // load all sheets
     let worksheets: &Vec<String> = &workbook.worksheets.iter().map(|s| s.name.clone()).collect();
     let mut sheets = Vec::new();
-    let mut selected_sheet = 0;
-    let mut sheet_index = 0;
 
     let defined_names = workbook.get_defined_names_with_scope();
 
@@ -1099,7 +1047,7 @@ pub(super) fn load_sheets<R: Read + std::io::Seek>(
                 comments: comments.to_vec(),
                 hyperlink_rels: hyperlink_rels.clone(),
             };
-            let (s, is_selected) = load_sheet(
+            let s = load_sheet(
                 archive,
                 &path,
                 settings,
@@ -1110,14 +1058,10 @@ pub(super) fn load_sheets<R: Read + std::io::Seek>(
                 theme,
                 dxfs,
             )?;
-            if is_selected {
-                selected_sheet = sheet_index;
-            }
             sheets.push(s);
-            sheet_index += 1;
         }
     }
-    Ok((sheets, selected_sheet))
+    Ok(sheets)
 }
 
 #[cfg(test)]
@@ -1128,7 +1072,9 @@ mod tests {
 
     use crate::import::xml::XmlNode;
 
-    use crate::import::worksheets::{load_hyperlinks, parse_cell_number, parse_reference};
+    use crate::import::worksheets::{
+        get_default_column_width, load_columns, load_hyperlinks, parse_cell_number, parse_reference,
+    };
 
     #[test]
     fn cell_numbers_are_finite() {
@@ -1147,6 +1093,50 @@ mod tests {
         assert!(cell_reference.is_ok());
         let cell_reference = cell_reference.unwrap();
         assert_eq!(cell_reference.sheet, "📈 Overview");
+    }
+
+    #[test]
+    fn load_columns_missing_width_falls_back_to_sheet_default() {
+        // A <col> without a width attribute is valid OOXML (#1509): Excel
+        // applies the sheet default width instead of rejecting the file.
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+            <sheetFormatPr baseColWidth="8" defaultColWidth="9.1640625" defaultRowHeight="12"/>
+            <cols>
+                <col min="1" max="1" width="5.25" customWidth="1"/>
+                <col min="2" max="55" hidden="1" style="1"/>
+            </cols>
+        </worksheet>"#;
+        let doc = XmlNode::parse_str(xml).unwrap();
+        let ws = &doc;
+
+        assert_eq!(get_default_column_width(ws), 9.1640625);
+        let cols = load_columns(ws, get_default_column_width(ws)).unwrap();
+        assert_eq!(cols.len(), 2);
+        assert_eq!(cols[0].width, 5.25);
+        assert!(cols[0].custom_width);
+        // No width attribute: sheet default applies, and the column is not
+        // marked as custom width.
+        assert_eq!(cols[1].width, 9.1640625);
+        assert!(!cols[1].custom_width);
+        assert!(cols[1].hidden);
+        assert_eq!(cols[1].style, Some(1));
+    }
+
+    #[test]
+    fn load_columns_missing_width_without_sheet_format_uses_excel_default() {
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+            <cols>
+                <col min="3" max="3" style="2"/>
+            </cols>
+        </worksheet>"#;
+        let doc = XmlNode::parse_str(xml).unwrap();
+        let ws = &doc;
+
+        assert_eq!(get_default_column_width(ws), 8.43);
+        let cols = load_columns(ws, get_default_column_width(ws)).unwrap();
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].width, 8.43);
+        assert!(!cols[0].custom_width);
     }
 
     #[test]
