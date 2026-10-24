@@ -94,6 +94,11 @@ fn is_valid_r1c1_identifier(name: &str, next_char: Option<char>) -> bool {
     utils::is_valid_identifier(name) || next_char != Some('[')
 }
 
+/// A character that can be part of an identifier (see `consume_identifier`)
+fn is_identifier_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '.'
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum LexerMode {
     A1,
@@ -794,6 +799,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn consume_range(&mut self, sheet: Option<String>) -> TokenType {
+        let start = self.position;
         let m = if self.mode == LexerMode::A1 {
             self.consume_range_a1()
         } else {
@@ -801,6 +807,13 @@ impl<'a> Lexer<'a> {
         };
         match m {
             Ok(ParsedRange { left, right }) => {
+                // `Sheet1!Q1_Total`: the reference is only the start of a
+                // longer identifier, a defined name
+                if sheet.is_some() && self.peek_char().is_some_and(is_identifier_char) {
+                    if let Some(sheet) = sheet {
+                        return self.consume_qualified_identifier(sheet, start, None);
+                    }
+                }
                 if let Some(right) = right {
                     TokenType::Range { sheet, left, right }
                 } else {
@@ -813,7 +826,38 @@ impl<'a> Lexer<'a> {
                     }
                 }
             }
-            Err(error) => TokenType::Illegal(error),
+            Err(error) => match sheet {
+                // `Sheet1!Name` is not a reference, but could be a defined name
+                Some(sheet) => self.consume_qualified_identifier(sheet, start, Some(error)),
+                None => TokenType::Illegal(error),
+            },
         }
+    }
+
+    /// What follows `Sheet1!` when it is not a complete reference: a defined
+    /// name qualified with a sheet (`Sheet1!MyName`), or else an error (the
+    /// original one if there was one).
+    fn consume_qualified_identifier(
+        &mut self,
+        sheet: String,
+        position: usize,
+        error: Option<LexerError>,
+    ) -> TokenType {
+        self.position = position;
+        let name = self.consume_identifier();
+        let is_valid = match self.mode {
+            LexerMode::A1 => utils::is_valid_a1_identifier(&name),
+            LexerMode::R1C1 => {
+                let next_char = self.peek_char();
+                is_valid_r1c1_identifier(&name, next_char)
+            }
+        };
+        if !name.is_empty() && is_valid {
+            return TokenType::QualifiedIdent { sheet, name };
+        }
+        let error =
+            error.unwrap_or_else(|| self.set_error("Invalid reference or identifier", position));
+        self.position = self.len;
+        TokenType::Illegal(error)
     }
 }

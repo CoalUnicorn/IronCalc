@@ -38,9 +38,7 @@ import {
   saveThemeModeInStorage,
   selectModelFromStorage,
   subscribeToStorage,
-  systemPrefersDark,
   type ThemeMode,
-  watchSystemDarkMode,
 } from "./components/storage";
 import TemplatesDialog from "./components/WelcomeDialog/TemplatesDialog";
 import WelcomeDialog from "./components/WelcomeDialog/WelcomeDialog";
@@ -53,10 +51,7 @@ function App() {
   const [themeMode, setThemeMode] = useState<ThemeMode>(
     loadThemeModeFromStorage,
   );
-  const [systemIsDark, setSystemIsDark] = useState(systemPrefersDark);
-  useEffect(() => watchSystemDarkMode(setSystemIsDark), []);
-  const isDarkMode =
-    themeMode === "system" ? systemIsDark : themeMode === "dark";
+  const isDarkMode = themeMode === "dark";
 
   const ironCalcRef = useRef<IronCalcHandle>(null);
   // A workbook opened from a link (?model= or ?example=) stays read-only until
@@ -137,16 +132,23 @@ function App() {
         setIsReadOnly(true);
       } else {
         // try to load from storage
-        const result = await loadSelectedModelFromStorage();
-        if (result) {
-          setModel(result);
-        } else if (isStorageEmpty()) {
-          setShowWelcomeDialog(true);
-          const createdModel = createModelWithSafeTimezone("template");
-          setModel(createdModel);
-        } else {
-          // There are workbooks but none could be selected: start a new one
-          setModel(await createNewModel());
+        try {
+          const result = await loadSelectedModelFromStorage();
+          if (result) {
+            setModel(result);
+          } else if (isStorageEmpty()) {
+            setShowWelcomeDialog(true);
+            const createdModel = createModelWithSafeTimezone("template");
+            setModel(createdModel);
+          } else {
+            // There are workbooks but none could be selected: start a new one
+            setModel(await createNewModel());
+          }
+        } catch (e) {
+          // Storage is unusable (e.g. IndexedDB unavailable): still load the
+          // app with an in-memory workbook.
+          console.error("Storage failed, using an in-memory workbook", e);
+          setModel(createModelWithSafeTimezone(t("default_workbook_name")));
         }
       }
       i18n.changeLanguage(language);
