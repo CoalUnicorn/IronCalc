@@ -1,11 +1,20 @@
-import { IconButton, type Model, Tooltip } from "@ironcalc/workbook";
+import {
+  IconButton,
+  type IronCalcHandle,
+  type Model,
+  Tooltip,
+} from "@ironcalc/workbook";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
-import { useLayoutEffect, useRef, useState } from "react";
+import { type RefObject, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { MIN_MAIN_CONTENT_WIDTH_FOR_MOBILE } from "../App";
+import { EditMenu } from "./Navigation/EditMenu";
 import { FileMenu } from "./Navigation/FileMenu";
+import { FormatMenu } from "./Navigation/FormatMenu";
 import { HelpMenu } from "./Navigation/HelpMenu";
+import { InsertMenu } from "./Navigation/InsertMenu";
 import { MobileMenu } from "./Navigation/MobileMenu";
+import { ViewMenu } from "./Navigation/ViewMenu";
 import { downloadModel } from "./rpc";
 import { ShareButton } from "./ShareWorkbook/ShareButton";
 import ShareWorkbookDialog from "./ShareWorkbook/ShareDialog";
@@ -16,10 +25,11 @@ import { WorkbookTitle } from "./WorkbookTitle";
 
 import "./file-bar.css";
 
-type OpenMenu = "file" | "help" | null;
+type OpenMenu = "file" | "edit" | "view" | "insert" | "format" | "help" | null;
 
 export function FileBar(properties: {
   model: Model;
+  ironCalcRef: RefObject<IronCalcHandle | null>;
   newModel: () => void;
   newModelFromTemplate: () => void;
   setModel: (key: string) => void;
@@ -105,6 +115,42 @@ export function FileBar(properties: {
             themeMode={properties.themeMode}
             onThemeModeChange={properties.onThemeModeChange}
           />
+          {!properties.isReadOnly && (
+            <>
+              <EditMenu
+                ironCalcRef={properties.ironCalcRef}
+                model={properties.model}
+                isOpen={openMenu === "edit"}
+                onOpen={() => setOpenMenu("edit")}
+                onClose={closeMenus}
+                onHover={() => openMenu && setOpenMenu("edit")}
+              />
+              <ViewMenu
+                ironCalcRef={properties.ironCalcRef}
+                model={properties.model}
+                isOpen={openMenu === "view"}
+                onOpen={() => setOpenMenu("view")}
+                onClose={closeMenus}
+                onHover={() => openMenu && setOpenMenu("view")}
+              />
+              <InsertMenu
+                ironCalcRef={properties.ironCalcRef}
+                model={properties.model}
+                isOpen={openMenu === "insert"}
+                onOpen={() => setOpenMenu("insert")}
+                onClose={closeMenus}
+                onHover={() => openMenu && setOpenMenu("insert")}
+              />
+              <FormatMenu
+                ironCalcRef={properties.ironCalcRef}
+                model={properties.model}
+                isOpen={openMenu === "format"}
+                onOpen={() => setOpenMenu("format")}
+                onClose={closeMenus}
+                onHover={() => openMenu && setOpenMenu("format")}
+              />
+            </>
+          )}
           <HelpMenu
             isOpen={openMenu === "help"}
             onOpen={() => setOpenMenu("help")}

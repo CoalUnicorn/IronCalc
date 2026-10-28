@@ -1,6 +1,7 @@
 mod conditional_formatting;
 mod test_actions;
 mod test_arabic_roman;
+mod test_base_decimal;
 mod test_binary_search;
 mod test_ceiling_floor;
 mod test_cell;

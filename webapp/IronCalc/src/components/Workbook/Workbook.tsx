@@ -7,7 +7,15 @@ import type {
   WorksheetProperties,
 } from "@ironcalc/wasm";
 import { type Color, getThemeList } from "@ironcalc/wasm";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  type ForwardedRef,
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import {
   CLIPBOARD_ID_SESSION_STORAGE_KEY,
@@ -33,7 +41,9 @@ import type WorksheetCanvas from "../WorksheetCanvas/worksheetCanvas";
 import { devicePixelRatio } from "../WorksheetCanvas/worksheetCanvas";
 import type { WorkbookState } from "../workbookState";
 import useKeyboardNavigation from "./useKeyboardNavigation";
+import type { WorkbookActions } from "./workbookActions";
 import "./workbook.css";
+import FormatPicker from "../FormatMenu/FormatPicker";
 import { LinkDialog } from "../LinkDialog/LinkDialog";
 import { Alert } from "../Modal";
 
@@ -47,12 +57,19 @@ function colorToParam(color: Color): string {
   return `[${color[0]}, ${color[1]}]`;
 }
 
-const Workbook = (props: {
+interface WorkbookProperties {
   model: Model;
   workbookState: WorkbookState;
   /** When false, the toolbar is hidden, the formula bar is read-only and all edits are blocked. */
   canEdit?: boolean;
-}) => {
+}
+
+// The ref exposes the `WorkbookActions` so the host application can drive
+// the workbook (see `IronCalcHandle.workbook`).
+const Workbook = (
+  props: WorkbookProperties,
+  ref: ForwardedRef<WorkbookActions>,
+) => {
   const { model, workbookState, canEdit = true } = props;
   const { t } = useTranslation();
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -69,6 +86,7 @@ const Workbook = (props: {
     title: string;
     message: string;
   } | null>(null);
+  const [isFormatPickerOpen, setFormatPickerOpen] = useState(false);
   const [isDrawerOpen, setDrawerOpen] = useState(false);
   const [drawerWidth, setDrawerWidth] = useState(DEFAULT_DRAWER_WIDTH);
   const [drawerType, setDrawerType] = useState<DrawerType>("namedRanges");
@@ -382,6 +400,186 @@ const Workbook = (props: {
     setRedrawId((id) => id + 1);
   };
 
+  // Wraps a mutating action so it is a no-op when the workbook is read-only
+  const whenEditable =
+    <A extends unknown[]>(action: (...args: A) => void) =>
+    (...args: A): void => {
+      if (canEdit) {
+        action(...args);
+      }
+    };
+
+  // Toggles a boolean font property of the selection, based on the style of
+  // the selected cell (the one the toolbar displays)
+  const toggleFontProperty = (
+    property: "b" | "i" | "u" | "strike",
+    apply: (value: boolean) => void,
+  ) => {
+    const { sheet, row, column } = model.getSelectedView();
+    const value = model.getCellStyle(sheet, row, column).style.font[property];
+    apply(!value);
+  };
+
+  // Runs an insert on the model, showing a dialog if it fails (for instance
+  // when it would split a merged cell)
+  const insertRowsOrColumns = (
+    insert: () => void,
+    what: "rows" | "columns",
+  ) => {
+    try {
+      insert();
+    } catch {
+      const title = t(`error_dialog.error_inserting_${what}`);
+      setAlertDialog({ title, message: title });
+    }
+    setRedrawId((id) => id + 1);
+  };
+
+  // The one implementation behind the toolbar, the keyboard shortcuts and the
+  // host application (through the imperative handle)
+  const actions: WorkbookActions = {
+    refresh: () => {
+      setRedrawId((id) => id + 1);
+    },
+    undo: whenEditable(onUndo),
+    redo: whenEditable(onRedo),
+    // Copy and cut go through the browser's clipboard events handled by the
+    // root element below, so the workbook needs the focus and a selection
+    copy: () => {
+      focusWorkbook();
+      document.execCommand("copy");
+    },
+    cut: whenEditable(() => {
+      focusWorkbook();
+      document.execCommand("cut");
+    }),
+    paste: whenEditable(() => {
+      handlePaste();
+    }),
+    toggleBold: whenEditable(() => toggleFontProperty("b", onToggleBold)),
+    toggleItalic: whenEditable(() => toggleFontProperty("i", onToggleItalic)),
+    toggleUnderline: whenEditable(() =>
+      toggleFontProperty("u", onToggleUnderline),
+    ),
+    toggleStrikethrough: whenEditable(() =>
+      toggleFontProperty("strike", onToggleStrike),
+    ),
+    setHorizontalAlignment: whenEditable(onToggleHorizontalAlign),
+    setVerticalAlignment: whenEditable(onToggleVerticalAlign),
+    setWrapText: whenEditable(onToggleWrapText),
+    setNumberFormat: whenEditable(onNumberFormatPicked),
+    setFontSize: whenEditable(onSetFontSize),
+    increaseFontSize: whenEditable(onIncreaseFontSize),
+    clearFormatting: whenEditable(() => {
+      const {
+        sheet,
+        range: [rowStart, columnStart, rowEnd, columnEnd],
+      } = model.getSelectedView();
+      model.rangeClearFormatting(
+        sheet,
+        rowStart,
+        columnStart,
+        rowEnd,
+        columnEnd,
+      );
+      setRedrawId((id) => id + 1);
+    }),
+    insertRowsAbove: whenEditable(() => {
+      const { sheet, row, height } = getSelectedArea();
+      insertRowsOrColumns(() => model.insertRows(sheet, row, height), "rows");
+    }),
+    insertRowsBelow: whenEditable(() => {
+      const { sheet, row, height } = getSelectedArea();
+      insertRowsOrColumns(
+        () => model.insertRows(sheet, row + height, height),
+        "rows",
+      );
+    }),
+    insertColumnsLeft: whenEditable(() => {
+      const { sheet, column, width } = getSelectedArea();
+      insertRowsOrColumns(
+        () => model.insertColumns(sheet, column, width),
+        "columns",
+      );
+    }),
+    insertColumnsRight: whenEditable(() => {
+      const { sheet, column, width } = getSelectedArea();
+      insertRowsOrColumns(
+        () => model.insertColumns(sheet, column + width, width),
+        "columns",
+      );
+    }),
+    openConditionalFormatting: whenEditable(() => {
+      openDrawer("conditionalFormatting");
+    }),
+    openNamedRanges: whenEditable(() => {
+      openDrawer("namedRanges");
+    }),
+    openThemes: whenEditable(() => {
+      openDrawer("themes");
+    }),
+    openNamedStyles: whenEditable(() => {
+      openDrawer("namedStyles");
+    }),
+    mergeCells: whenEditable(onMergeCells),
+    getMergeCellsState,
+    openCustomNumberFormat: whenEditable(() => {
+      setFormatPickerOpen(true);
+    }),
+    openLinkDialog: whenEditable(() => {
+      const { sheet, row, column } = model.getSelectedView();
+      openLinkDialog(sheet, row, column);
+    }),
+    downloadSelectionAsPng: () => {
+      // creates a new canvas element in the visible part of the the selected area
+      const worksheetCanvas = worksheetRef.current?.getCanvas();
+      if (!worksheetCanvas) {
+        return;
+      }
+      const {
+        range: [rowStart, columnStart, rowEnd, columnEnd],
+      } = model.getSelectedView();
+      // NB: cells outside of the displayed area are not rendered
+      // I think the only reasonable way to do this would be server side.
+      let [x, y] = worksheetCanvas.getCoordinatesByCell(rowStart, columnStart);
+      const [x1, y1] = worksheetCanvas.getCoordinatesByCell(
+        rowEnd + 1,
+        columnEnd + 1,
+      );
+      const width = (x1 - x) * devicePixelRatio;
+      const height = (y1 - y) * devicePixelRatio;
+      x *= devicePixelRatio;
+      y *= devicePixelRatio;
+
+      const capturedCanvas = document.createElement("canvas");
+      capturedCanvas.width = width;
+      capturedCanvas.height = height;
+      const ctx = capturedCanvas.getContext("2d");
+      if (!ctx) {
+        return;
+      }
+
+      ctx.drawImage(
+        worksheetCanvas.canvas,
+        x,
+        y,
+        width,
+        height,
+        0,
+        0,
+        width,
+        height,
+      );
+
+      const downloadLink = document.createElement("a");
+      downloadLink.href = capturedCanvas.toDataURL("image/png");
+      downloadLink.download = "ironcalc.png";
+      downloadLink.click();
+    },
+  };
+
+  useImperativeHandle(ref, () => actions);
+
   // FIXME: I *think* we should have only one on onKeyPressed function that goes to
   // the Rust backend
   const { onKeyDown } = useKeyboardNavigation({
@@ -468,21 +666,9 @@ const Workbook = (props: {
       });
       setRedrawId((id) => id + 1);
     },
-    onBold: () => {
-      const { sheet, row, column } = model.getSelectedView();
-      const value = model.getCellStyle(sheet, row, column).style.font.b;
-      onToggleBold(!value);
-    },
-    onItalic: () => {
-      const { sheet, row, column } = model.getSelectedView();
-      const value = model.getCellStyle(sheet, row, column).style.font.i;
-      onToggleItalic(!value);
-    },
-    onUnderline: () => {
-      const { sheet, row, column } = model.getSelectedView();
-      const value = model.getCellStyle(sheet, row, column).style.font.u;
-      onToggleUnderline(!value);
-    },
+    onBold: actions.toggleBold,
+    onItalic: actions.toggleItalic,
+    onUnderline: actions.toggleUnderline,
     onNavigationToEdge: (direction: NavigationKey): void => {
       model.onNavigateToEdgeInDirection(direction);
       setRedrawId((id) => id + 1);
@@ -512,27 +698,17 @@ const Workbook = (props: {
       setRedrawId((id) => id + 1);
     },
     onKeyHome: (): void => {
-      const view = model.getSelectedView();
       const cell = model.getSelectedCell();
       model.setSelectedCell(cell[1], 1);
-      model.setTopLeftVisibleCell(view.top_row, 1);
       setRedrawId((id) => id + 1);
     },
     onKeyEnd: (): void => {
-      const view = model.getSelectedView();
       const cell = model.getSelectedCell();
       model.setSelectedCell(cell[1], LAST_COLUMN);
-      model.setTopLeftVisibleCell(view.top_row, LAST_COLUMN - 5);
       setRedrawId((id) => id + 1);
     },
-    onUndo: (): void => {
-      model.undo();
-      setRedrawId((id) => id + 1);
-    },
-    onRedo: (): void => {
-      model.redo();
-      setRedrawId((id) => id + 1);
-    },
+    onUndo: actions.undo,
+    onRedo: actions.redo,
     onNextSheet: (): void => {
       const nextSheet = model.getSelectedSheet() + 1;
       if (nextSheet >= model.getWorksheetsProperties().length) {
@@ -573,13 +749,22 @@ const Workbook = (props: {
     root: rootRef,
   });
 
+  // Keeps the keyboard focus on the workbook after a render, so the shortcuts
+  // keep working after a click on the toolbar or a closed dialog. It must not
+  // take the focus from somewhere else though: a render caused from the
+  // outside (the host re-rendering or repainting after an external change)
+  // would otherwise interrupt whatever the user is doing there, for instance
+  // typing in another widget or in the host's own inputs.
   useEffect(() => {
-    if (!rootRef.current) {
+    const root = rootRef.current;
+    if (!root || workbookState.getEditingCell()) {
       return;
     }
-    if (!workbookState.getEditingCell()) {
-      focusWorkbook();
+    const active = document.activeElement;
+    if (active && active !== document.body && !root.contains(active)) {
+      return;
     }
+    focusWorkbook();
   });
 
   const cellAddress = useCallback(() => {
@@ -867,75 +1052,10 @@ const Workbook = (props: {
           onTextColorPicked={onTextColorPicked}
           onFillColorPicked={onFillColorPicked}
           onNumberFormatPicked={onNumberFormatPicked}
-          onClearFormatting={() => {
-            const {
-              sheet,
-              range: [rowStart, columnStart, rowEnd, columnEnd],
-            } = model.getSelectedView();
-            model.rangeClearFormatting(
-              sheet,
-              rowStart,
-              columnStart,
-              rowEnd,
-              columnEnd,
-            );
-            setRedrawId((id) => id + 1);
-          }}
-          onIncreaseFontSize={(delta: number) => {
-            onIncreaseFontSize(delta);
-          }}
-          onSetFontSize={(size: number) => {
-            onSetFontSize(size);
-          }}
-          onDownloadPNG={() => {
-            // creates a new canvas element in the visible part of the the selected area
-            const worksheetCanvas = worksheetRef.current?.getCanvas();
-            if (!worksheetCanvas) {
-              return;
-            }
-            const {
-              range: [rowStart, columnStart, rowEnd, columnEnd],
-            } = model.getSelectedView();
-            // NB: cells outside of the displayed area are not rendered
-            // I think the only reasonable way to do this would be server side.
-            let [x, y] = worksheetCanvas.getCoordinatesByCell(
-              rowStart,
-              columnStart,
-            );
-            const [x1, y1] = worksheetCanvas.getCoordinatesByCell(
-              rowEnd + 1,
-              columnEnd + 1,
-            );
-            const width = (x1 - x) * devicePixelRatio;
-            const height = (y1 - y) * devicePixelRatio;
-            x *= devicePixelRatio;
-            y *= devicePixelRatio;
-
-            const capturedCanvas = document.createElement("canvas");
-            capturedCanvas.width = width;
-            capturedCanvas.height = height;
-            const ctx = capturedCanvas.getContext("2d");
-            if (!ctx) {
-              return;
-            }
-
-            ctx.drawImage(
-              worksheetCanvas.canvas,
-              x,
-              y,
-              width,
-              height,
-              0,
-              0,
-              width,
-              height,
-            );
-
-            const downloadLink = document.createElement("a");
-            downloadLink.href = capturedCanvas.toDataURL("image/png");
-            downloadLink.download = "ironcalc.png";
-            downloadLink.click();
-          }}
+          onClearFormatting={actions.clearFormatting}
+          onIncreaseFontSize={actions.increaseFontSize}
+          onSetFontSize={actions.setFontSize}
+          onDownloadPNG={actions.downloadSelectionAsPng}
           onBorderChanged={(border: BorderOptions): void => {
             const {
               sheet,
@@ -970,8 +1090,8 @@ const Workbook = (props: {
             style.alignment?.vertical ? style.alignment.vertical : "bottom"
           }
           wrapText={style.alignment?.wrap_text || false}
-          mergeCellsState={getMergeCellsState()}
-          onMergeCells={onMergeCells}
+          mergeCellsState={actions.getMergeCellsState()}
+          onMergeCells={actions.mergeCells}
           canEdit={true}
           numFmt={style.num_fmt}
           showGridLines={model.getShowGridLines(model.getSelectedSheet())}
@@ -987,16 +1107,13 @@ const Workbook = (props: {
           isConditionalFormattingOpen={
             isDrawerOpen && drawerType === "conditionalFormatting"
           }
-          onOpenNamedStyles={() => openDrawer("namedStyles")}
+          onOpenNamedStyles={actions.openNamedStyles}
           isNamedStylesOpen={isDrawerOpen && drawerType === "namedStyles"}
-          onOpenLinkDialog={() => {
-            const { sheet, row, column } = model.getSelectedView();
-            openLinkDialog(sheet, row, column);
-          }}
+          onOpenLinkDialog={actions.openLinkDialog}
           themes={themes}
           currentTheme={currentTheme}
           onThemePicked={handleThemePicked}
-          onOpenThemes={() => openDrawer("themes")}
+          onOpenThemes={actions.openThemes}
         />
       )}
       <div
@@ -1017,9 +1134,7 @@ const Workbook = (props: {
           }}
           model={model}
           workbookState={workbookState}
-          openDrawer={() => {
-            openDrawer("namedRanges");
-          }}
+          openDrawer={actions.openNamedRanges}
           canEdit={canEdit && canEditFormula}
         />
         <Worksheet
@@ -1030,15 +1145,7 @@ const Workbook = (props: {
           }}
           ref={worksheetRef}
           canEdit={canEdit && canEditFormula}
-          onCut={(): void => {
-            focusWorkbook();
-            document.execCommand("cut");
-          }}
-          onCopy={(): void => {
-            focusWorkbook();
-            document.execCommand("copy");
-          }}
-          onPaste={handlePaste}
+          actions={actions}
           onEditLink={
             canEdit
               ? (row: number, column: number): void => {
@@ -1202,6 +1309,12 @@ const Workbook = (props: {
         title={alertDialog?.title ?? ""}
         message={alertDialog?.message ?? ""}
       />
+      <FormatPicker
+        open={isFormatPickerOpen}
+        onClose={() => setFormatPickerOpen(false)}
+        numFmt={style.num_fmt}
+        onChange={onNumberFormatPicked}
+      />
       {linkDialogCell && (
         <LinkDialog
           open
@@ -1230,4 +1343,4 @@ const Workbook = (props: {
   );
 };
 
-export default Workbook;
+export default forwardRef(Workbook);
